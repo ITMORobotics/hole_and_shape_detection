@@ -8,6 +8,9 @@ import sys
 import time
 import rospy
 
+import spatialmath as spm
+import spatialmath.base as spmb
+
 import numpy.linalg as LA
 
 from pyqtgraph.Qt import QtCore, QtGui
@@ -27,11 +30,16 @@ from threading import Thread
 median_circ = md.MedianFilter(3, 15)
 median_sqr = md.MedianFilter(3, 15)
 
-def send_pose(publisher, xyz: np.ndarray):
+def send_pose(publisher, xyz: np.ndarray, quaternion : np.ndarray):
 	pose = Pose()
 	pose.position.x = xyz[0]
 	pose.position.y = xyz[1]
 	pose.position.z = xyz[2]
+	pose.orientation.x = quaternion[0]
+	pose.orientation.y = quaternion[1]
+	pose.orientation.z = quaternion[2]
+	pose.orientation.w = quaternion[3]
+
 	publisher.publish(pose)
 
 class myThread (Thread):
@@ -53,20 +61,20 @@ class myThread (Thread):
 				img_circ, circle = detecCircle(img_orig)
 				img_sqr, square = detecRectangle(img_orig)
 				if not np.all(circle == 0):
-					img, XYZ_circ = getXYZCircle(circle, img_circ, depth_img, XYZ)
+					img, XYZ_circ, angvec_circ = getXYZCircle(circle, img_circ, depth_img, XYZ)
 					if (XYZ_circ[2] != 0):
 						XYZ_circ = median_circ.apply_median(XYZ_circ)
 
 						if not np.all(XYZ_circ == 0):
-							send_pose(circle_publisher, np.array(XYZ_circ).flatten())
+							send_pose(circle_publisher, np.array(XYZ_circ).flatten(), [0,0,0,0])
 				if not np.all(square == 0):
-					img , XYZ_sqr = getXYZRectangle(square, img_sqr, depth_img, XYZ)
+					img, XYZ_sqr, angvec_sqr = getXYZRectangle(square, img_sqr, depth_img, XYZ)
 					if (XYZ_sqr[2] != 0):
 						XYZ_sqr = median_sqr.apply_median(XYZ_sqr)
 
 						if not np.all(XYZ_sqr == 0):
-							send_pose(square_publisher, np.array(XYZ_sqr).flatten())
-				w.updateIMG(img_sqr)
+							send_pose(square_publisher, np.array(XYZ_sqr).flatten(), [0,0,0,0])
+				w.updateIMG(img_circ)
 				if rospy.is_shutdown():
 					break
 
@@ -103,16 +111,26 @@ def getXYZCircle(circle, img, depth, XYZ):
 	try:
 		theta = LA.inv(X.T.dot(X)).dot(X.T).dot(Y)
 	except Exception as e:
-		print(e)
-		return img,[0,0,0]
+		# print(e)
+		return img,[0,0,0],[0,0,0,0]
 	A, B, C, D = theta
 	C -= 1
+
+	z = np.array([A, B, C])
+	z = z/LA.norm(z)
+	x = np.array([0,1,0])
+	y = np.cross(x, z)
+	x = np.cross(y, z)
+	rot = np.array([x,y,z]).T
+
+	rot2 = spmb.trnorm(rot)
+	rt = spm.SO3(rot2)
 
 	X_circle = (np.max(plane_XYZ[:, 0]) + np.min(plane_XYZ[:, 0])) / 2
 	Y_circle = (np.max(plane_XYZ[:, 1]) + np.min(plane_XYZ[:, 1])) / 2
 	Z_circle = (-D-A*X_circle - B*Y_circle)/C
 
-	return  depth_original, [X_circle, Y_circle, Z_circle] #X_circle_depth, Y_circle_depth, Z_circle_depth
+	return  depth_original, [X_circle, Y_circle, Z_circle], rt.angvec() #X_circle_depth, Y_circle_depth, Z_circle_depth
 
 def getXYZRectangle(square, img, depth, XYZ):
 	offset = 25
@@ -138,16 +156,26 @@ def getXYZRectangle(square, img, depth, XYZ):
 	try:
 		theta = LA.inv(X.T.dot(X)).dot(X.T).dot(Y)
 	except Exception as e:
-		print(e)
-		return img,[0,0,0]
+		# print(e)
+		return img,[0,0,0],[0,0,0,0]
 	A, B, C, D = theta
 	C -= 1
+
+	z = np.array([A, B, C])
+	z = z / LA.norm(z)
+	x = np.array([0, 1, 0])
+	y = np.cross(x, z)
+	x = np.cross(y, z)
+	rot = np.array([x, y, z]).T
+
+	rot2 = spmb.trnorm(rot)
+	rt = spm.SO3(rot2)
 
 	X_circle = (np.max(plane_XYZ[:, 0]) + np.min(plane_XYZ[:, 0])) / 2
 	Y_circle = (np.max(plane_XYZ[:, 1]) + np.min(plane_XYZ[:, 1])) / 2
 	Z_circle = (-D-A*X_circle - B*Y_circle)/C
 
-	return  depth, [X_circle, Y_circle, Z_circle] #X_circle_depth, Y_circle_depth, Z_circle_depth
+	return  depth, [X_circle, Y_circle, Z_circle], rt.angvec()  #X_circle_depth, Y_circle_depth, Z_circle_depth
 
 def detecRectangle(img):
 	img = cv.medianBlur(img, 3)
@@ -202,7 +230,7 @@ def detecRectangle(img):
 
 		cv.drawContours(img, [points[m]], 0, (0, 255, 0), 4)
 	except Exception as e:
-		print("Square not found or", e)
+		# print("Square not found or", e)
 		square = [0,0,0,0]
 	finally:
 		return np.array(img), square
@@ -235,7 +263,7 @@ def detecCircle(img):
 		cv.line(img, (int(img.shape[1]/2) - line_length, int(img.shape[0]/2)), (int(img.shape[1]/2) + line_length, int(img.shape[0]/2)), (255, 0, 0), 1)
 		cv.line(img, (int(img.shape[1]/2) , int(img.shape[0]/2)- line_length), (int(img.shape[1]/2) , int(img.shape[0]/2)+ line_length), (255, 0, 0), 1)
 	except Exception as e:
-		print("Circle not found or", e)
+		# print("Circle not found or", e)
 		circles = [0,0,0]
 	finally:
 		return np.array(img), circles
